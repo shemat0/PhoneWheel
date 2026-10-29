@@ -1,0 +1,88 @@
+name: Publish PhoneWheel release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: phonewheel-release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the tagged version
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Validate version, binaries and checksums
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/validate_release.py "$RELEASE_TAG"
+
+      - name: Test the receiver
+        run: python3 -m unittest discover -s tests -v
+
+      - name: Test Android-independent production logic
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/phonewheel-java"
+          mapfile -t sources < <(find android/src -name '*.java' ! -name MainActivity.java)
+          mapfile -t tests < <(find tests -name '*.java')
+          javac --release 8 -encoding UTF-8 -d "$RUNNER_TEMP/phonewheel-java" "${sources[@]}" "${tests[@]}"
+          for test in SteeringTest SendTimingTest AckTrackerTest ControlModelTest LinkHealthTest AckLineReaderTest DiagramTapTest JoystickTest; do
+            java -cp "$RUNNER_TEMP/phonewheel-java" "$test"
+          done
+
+      - name: Create draft, verify downloadable assets, and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --title "PhoneWheel $RELEASE_TAG" --notes-file RELEASE_NOTES.md
+          fi
+          is_draft="$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)"
+          for path in dist/PhoneWheel.apk dist/PhoneWheelReceiver.exe SHA256SUMS.txt; do
+            name="${path##*/}"
+            if ! gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              if [ "$is_draft" != true ]; then
+                echo "Published release is missing $name; refusing to modify an existing published version" >&2
+                exit 1
+              fi
+              gh release upload "$RELEASE_TAG" "$path"
+            fi
+          done
+          verify_dir="$RUNNER_TEMP/phonewheel-release-assets"
+          mkdir -p "$verify_dir"
+          gh release download "$RELEASE_TAG" --dir "$verify_dir" \
+            --pattern PhoneWheel.apk --pattern PhoneWheelReceiver.exe --pattern SHA256SUMS.txt
+          cmp dist/PhoneWheel.apk "$verify_dir/PhoneWheel.apk"
+          cmp dist/PhoneWheelReceiver.exe "$verify_dir/PhoneWheelReceiver.exe"
+          cmp SHA256SUMS.txt "$verify_dir/SHA256SUMS.txt"
+          (cd "$verify_dir" && sha256sum -c SHA256SUMS.txt)
+          if [ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true ]; then
+            gh release edit "$RELEASE_TAG" --draft=false --latest
+          fi
+          gh release view "$RELEASE_TAG" --json url,tagName,isDraft,assets > "$RUNNER_TEMP/phonewheel-release-receipt.json"
+          python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert not d["isDraft"]; assert {"PhoneWheel.apk","PhoneWheelReceiver.exe","SHA256SUMS.txt"} <= {a["name"] for a in d["assets"]}' "$RUNNER_TEMP/phonewheel-release-receipt.json"
+
+      - name: Record verified publication receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin refs/notes/phonewheel-releases:refs/notes/phonewheel-releases || true
+          git notes --ref=phonewheel-releases add -f -F "$RUNNER_TEMP/phonewheel-release-receipt.json" "$GITHUB_SHA"
+          git push origin refs/notes/phonewheel-releases
