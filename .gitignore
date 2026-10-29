@@ -1,0 +1,13 @@
+# Local toolchain output, caches, archives, and signing material
+build-tools/
+__pycache__/
+*.py[cod]
+*.jks
+*.keystore
+*.pem
+.env
+.env.*
+*.zip
+*.7z
+*.rar
+*.idsig
