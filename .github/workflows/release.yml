@@ -3,7 +3,13 @@ name: Publish PhoneWheel release
 on:
   push:
     tags:
-      - 'v[0-9]*'
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag, for example v1.8'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -20,10 +26,12 @@ jobs:
     steps:
       - name: Check out the tagged version
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - name: Validate version, binaries and checksums
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: python3 scripts/validate_release.py "$RELEASE_TAG"
 
       - name: Test the receiver
@@ -44,7 +52,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
@@ -84,5 +92,5 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin refs/notes/phonewheel-releases:refs/notes/phonewheel-releases || true
-          git notes --ref=phonewheel-releases add -f -F "$RUNNER_TEMP/phonewheel-release-receipt.json" "$GITHUB_SHA"
+          git notes --ref=phonewheel-releases add -f -F "$RUNNER_TEMP/phonewheel-release-receipt.json" "$(git rev-parse HEAD)"
           git push origin refs/notes/phonewheel-releases
